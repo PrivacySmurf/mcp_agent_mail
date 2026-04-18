@@ -373,7 +373,7 @@ class _LRURepoCache:
     # This replaces the unreliable sys.getrefcount() heuristic which created
     # phantom references from iteration, locals, and stack frames, causing
     # evicted repos to accumulate indefinitely and leak file descriptors.
-    EVICTION_GRACE_SECONDS: float = 60.0
+    EVICTION_GRACE_SECONDS: float = 5.0
 
     def __init__(self, maxsize: int = 16) -> None:
         self._maxsize = max(1, maxsize)
@@ -1759,8 +1759,9 @@ async def _commit_direct(
         return
 
     actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
-    repo = Repo(str(repo_root))
-    attempt_repo = repo  # May diverge from `repo` during EMFILE recovery
+    repo = await _ensure_repo(repo_root, settings)
+    attempt_repo = repo
+    owns_attempt_repo = False
 
     def _perform_commit(target_repo: Repo) -> None:
         target_repo.index.add(rel_paths)
@@ -1824,6 +1825,7 @@ async def _commit_direct(
                         with contextlib.suppress(Exception):
                             attempt_repo.close()
                         attempt_repo = Repo(str(repo_root))
+                        owns_attempt_repo = True
                         continue
 
                     # Handle git index.lock contention (concurrent git operations)
@@ -1874,22 +1876,15 @@ async def _commit_direct(
                     ) from last_index_lock_exc
                 raise RuntimeError("git commit failed after recovery attempts")
 
-            if attempt_repo is not repo:
+            if owns_attempt_repo and attempt_repo is not repo:
                 with contextlib.suppress(Exception):
                     attempt_repo.close()
+                owns_attempt_repo = False
     finally:
-        # Always close the repo we opened, even if an exception occurred.
-        # This prevents file descriptor leaks when exceptions are thrown
-        # between Repo() creation and the previous (non-finally) close.
-        #
-        # Also close attempt_repo if EMFILE recovery created a separate handle.
-        # Without this, a non-OSError exception after EMFILE recovery would leak
-        # the replacement repo (the original is already closed by recovery).
-        if attempt_repo is not repo:
+        if owns_attempt_repo and attempt_repo is not repo:
             with contextlib.suppress(Exception):
                 attempt_repo.close()
-        with contextlib.suppress(Exception):
-            repo.close()
+        # Do NOT close `repo` — the cache owns its lifecycle.
 
 
 async def _commit(
