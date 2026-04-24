@@ -232,6 +232,7 @@ TOOL_FILTER_PROFILES: dict[str, dict[str, list[str] | set[str]]] = {
             "send_message",
             "fetch_inbox",
             "acknowledge_message",
+            "mark_message_read",
         ],
     },
     "messaging": {
@@ -4153,6 +4154,7 @@ async def _list_inbox(
     include_bodies: bool,
     since_ts: Optional[str],
     topic: Optional[str] = None,
+    unread_only: bool = False,
 ) -> list[dict[str, Any]]:
     if project.id is None or agent.id is None:
         raise ValueError("Project and agent must have ids before listing inbox.")
@@ -4181,6 +4183,8 @@ async def _list_inbox(
         )
         if urgent_only:
             stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))
+        if unread_only:
+            stmt = stmt.where(cast(Any, MessageRecipient.read_ts).is_(None))
         if since_ts:
             since_dt = _parse_iso(since_ts)
             if since_dt:
@@ -8723,6 +8727,7 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         limit: int = 20,
         urgent_only: bool = False,
+        unread_only: bool = False,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
         topic: Optional[str] = None,
@@ -8735,6 +8740,7 @@ def build_mcp_server() -> FastMCP:
         Filters
         -------
         - `urgent_only`: only messages with importance in {high, urgent}
+        - `unread_only`: only messages where read_ts is NULL (server-side unread filtering)
         - `since_ts`: ISO-8601 timestamp string; messages strictly newer than this are returned
         - `limit`: max number of messages (default 20)
         - `include_bodies`: include full Markdown bodies in the payloads
@@ -8795,7 +8801,7 @@ def build_mcp_server() -> FastMCP:
                 token_param="registration_token",
                 action="fetch_inbox",
             )
-            items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts, topic=topic)
+            items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts, topic=topic, unread_only=unread_only)
             if settings.notifications.enabled:
                 with suppress(Exception):
                     await clear_notification_signal(settings, project.slug, agent.name)
